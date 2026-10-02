@@ -38,12 +38,14 @@ fun CurveEditor(
     onCurveChange: (List<SpeedPoint>) -> Unit,
     onSelect: (Int?) -> Unit,
     onScrub: (Float) -> Unit,
+    onGestureEnd: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val current by rememberUpdatedState(curve)
     val change by rememberUpdatedState(onCurveChange)
     val select by rememberUpdatedState(onSelect)
     val scrub by rememberUpdatedState(onScrub)
+    val gestureEnd by rememberUpdatedState(onGestureEnd)
 
     Box(modifier.fillMaxWidth().height(190.dp)) {
         Canvas(
@@ -72,6 +74,7 @@ fun CurveEditor(
                             }
                             c.consume()
                         }
+                        gestureEnd()
                     }
                 },
         ) {

@@ -2,8 +2,8 @@ package com.vits.engine.render
 
 import android.opengl.GLES11Ext
 import android.opengl.GLES30.glDeleteTextures
-import com.vits.engine.MediaInfo
 import com.vits.engine.MediaInput
+import com.vits.project.MediaAsset
 import com.vits.engine.decode.VideoFrameSource
 import com.vits.engine.gl.GlKit
 import com.vits.engine.gl.RenderTexture
@@ -20,7 +20,7 @@ internal class FrameSlot(val texture: RenderTexture) {
  * Keeps the two source frames that bracket the current time resident on the GPU. Moving forward
  * decodes sequentially (cheap); jumping backward or far ahead seeks to a keyframe.
  */
-internal class FrameCache(input: MediaInput, info: MediaInfo, private val gl: GlKit) : Closeable {
+internal class FrameCache(input: MediaInput, info: MediaAsset, private val gl: GlKit) : Closeable {
     private val oes = createOesTexture()
     private val source = VideoFrameSource(input, info, oes)
     private val slots = Array(3) { FrameSlot(RenderTexture(info.width, info.height, RenderTexture.Format.RGBA8)) }

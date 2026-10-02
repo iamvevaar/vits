@@ -57,6 +57,18 @@ sealed interface SpeedSpec {
         override fun toString() = "Curve($points)"
     }
 
+    /**
+     * The part [x0]..[x1] of [base], stretched over 0..1. Trimmed or split clips use this so every
+     * source instant keeps exactly the speed it had before the edit.
+     */
+    data class Windowed(val base: SpeedSpec, val x0: Double, val x1: Double) : SpeedSpec {
+        init {
+            require(0.0 <= x0 && x0 < x1 && x1 <= 1.0) { "bad window $x0..$x1" }
+        }
+
+        override fun speedAt(x: Double) = base.speedAt(x0 + x.coerceIn(0.0, 1.0) * (x1 - x0))
+    }
+
     companion object {
         const val MIN_SPEED = 0.1
         const val MAX_SPEED = 100.0
@@ -68,5 +80,15 @@ sealed interface SpeedSpec {
 /** True when any part of the clip plays slower than real time, i.e. frames must be synthesized. */
 fun SpeedSpec.hasSlowMotion(): Boolean = when (this) {
     is SpeedSpec.Constant -> speed < 1.0
-    is SpeedSpec.Curve -> (0..256).any { speedAt(it / 256.0) < 0.999 }
+    else -> (0..256).any { speedAt(it / 256.0) < 0.999 }
+}
+
+/** Collapses windows over constants, which keeps the exact constant-speed path in [TimeMap]. */
+fun SpeedSpec.simplified(): SpeedSpec = when (this) {
+    is SpeedSpec.Windowed -> when (val b = base.simplified()) {
+        is SpeedSpec.Constant -> b
+        is SpeedSpec.Windowed -> SpeedSpec.Windowed(b.base, b.x0 + x0 * (b.x1 - b.x0), b.x0 + x1 * (b.x1 - b.x0))
+        else -> if (x0 == 0.0 && x1 == 1.0) b else SpeedSpec.Windowed(b, x0, x1)
+    }
+    else -> this
 }

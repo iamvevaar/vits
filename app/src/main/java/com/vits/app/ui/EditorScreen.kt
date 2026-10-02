@@ -40,7 +40,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vits.app.EditorViewModel
-import com.vits.app.ExportStatus
+import com.vits.app.export.ExportStatus
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
+import com.vits.app.R
+import com.vits.app.UiError
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 
 @Composable
 fun EditorScreen(vm: EditorViewModel) {
@@ -51,7 +60,21 @@ fun EditorScreen(vm: EditorViewModel) {
     val pickVideo = {
         picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
     }
-    val info = state.info
+    val clip = state.clip
+    val context = LocalContext.current
+    // Ask once for notifications so a background export can show progress; export runs either way.
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        vm.export()
+    }
+    val export = {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            vm.export()
+        }
+    }
 
     Column(
         Modifier
@@ -63,11 +86,11 @@ fun EditorScreen(vm: EditorViewModel) {
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Vits", color = VitsColors.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.app_name), color = VitsColors.Text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
-            if (info != null) {
-                TextButton(onClick = pickVideo) { Text("Replace", color = VitsColors.TextDim) }
-                Button(onClick = vm::export, enabled = state.export !is ExportStatus.Running) { Text("Export") }
+            if (clip != null) {
+                TextButton(onClick = pickVideo) { Text(stringResource(R.string.action_replace), color = VitsColors.TextDim) }
+                Button(onClick = export, enabled = state.export !is ExportStatus.Running) { Text(stringResource(R.string.action_export)) }
             }
         }
 
@@ -75,39 +98,44 @@ fun EditorScreen(vm: EditorViewModel) {
             Modifier.fillMaxWidth().weight(1f).background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
-            if (info != null) {
+            if (clip != null) {
                 VideoPreview(vm.engine, Modifier.fillMaxSize())
             } else if (state.loading) {
                 CircularProgressIndicator()
             } else {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Button(onClick = pickVideo) { Text("Import video") }
+                    Button(onClick = pickVideo) { Text(stringResource(R.string.action_import_video)) }
                     Spacer(Modifier.height(8.dp))
-                    Text("Works fully offline", color = VitsColors.TextDim, fontSize = 12.sp)
+                    Text(stringResource(R.string.works_offline), color = VitsColors.TextDim, fontSize = 12.sp)
                 }
             }
         }
 
-        if (info != null) {
+        if (clip != null) {
             Transport(
                 playing = state.playing,
                 positionUs = state.positionUs,
-                durationUs = vm.outputDurationUs,
+                durationUs = state.timelineDurationUs,
                 onToggle = vm::togglePlay,
                 onSeek = vm::seekTo,
+                onSeekFinished = vm::endGesture,
             )
             Box(Modifier.verticalScroll(rememberScrollState()).weight(1.15f)) {
-                SpeedPanel(state, vm, info.durationUs)
+                SpeedPanel(state, vm, clip)
             }
         }
     }
 
     ExportDialog(state.export, vm)
-    state.error?.let { msg ->
+    state.error?.let { err ->
+        val msg = stringResource(
+            if (err.kind == UiError.Kind.OPEN_FAILED) R.string.error_open_video else R.string.error_playback,
+            err.detail.orEmpty(),
+        )
         AlertDialog(
             onDismissRequest = vm::dismissError,
-            confirmButton = { TextButton(onClick = vm::dismissError) { Text("OK") } },
-            title = { Text("Something went wrong") },
+            confirmButton = { TextButton(onClick = vm::dismissError) { Text(stringResource(R.string.action_ok)) } },
+            title = { Text(stringResource(R.string.error_title)) },
             text = { Text(msg) },
         )
     }
@@ -120,16 +148,17 @@ private fun Transport(
     durationUs: Long,
     onToggle: () -> Unit,
     onSeek: (Long) -> Unit,
+    onSeekFinished: () -> Unit,
 ) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         IconButton(onClick = onToggle) {
-            if (playing) PauseGlyph() else Icon(Icons.Filled.PlayArrow, "Play", tint = VitsColors.Text)
+            if (playing) PauseGlyph() else Icon(Icons.Filled.PlayArrow, stringResource(R.string.action_play), tint = VitsColors.Text)
         }
         Text(
-            "${formatTime(positionUs)} / ${formatTime(durationUs)}",
+            stringResource(R.string.time_position, formatTime(positionUs), formatTime(durationUs)),
             color = VitsColors.TextDim,
             fontSize = 12.sp,
         )
@@ -137,6 +166,7 @@ private fun Transport(
         Slider(
             value = if (durationUs > 0) positionUs.toFloat() / durationUs else 0f,
             onValueChange = { onSeek((it * durationUs).toLong()) },
+            onValueChangeFinished = onSeekFinished,
             modifier = Modifier.weight(1f),
             colors = SliderDefaults.colors(
                 thumbColor = Color.White,
@@ -149,7 +179,10 @@ private fun Transport(
 
 @Composable
 private fun PauseGlyph() {
-    androidx.compose.foundation.Canvas(Modifier.width(18.dp).height(18.dp)) {
+    val label = stringResource(R.string.action_pause)
+    androidx.compose.foundation.Canvas(
+        Modifier.width(18.dp).height(18.dp).semantics { contentDescription = label },
+    ) {
         val w = size.width * 0.3f
         drawRect(VitsColors.Text, topLeft = androidx.compose.ui.geometry.Offset(size.width * 0.12f, 0f),
             size = androidx.compose.ui.geometry.Size(w, size.height))
@@ -165,21 +198,21 @@ private fun ExportDialog(status: ExportStatus, vm: EditorViewModel) {
         ExportStatus.Idle -> Unit
         is ExportStatus.Running -> AlertDialog(
             onDismissRequest = {},
-            title = { Text("Exporting") },
+            title = { Text(stringResource(R.string.export_running)) },
             text = {
                 Column {
                     LinearProgressIndicator(progress = { status.progress }, modifier = Modifier.fillMaxWidth())
                     Spacer(Modifier.height(8.dp))
-                    Text("${(status.progress * 100).toInt()}%", color = VitsColors.TextDim)
+                    Text(stringResource(R.string.export_percent, (status.progress * 100).toInt()), color = VitsColors.TextDim)
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = vm::cancelExport) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = vm::cancelExport) { Text(stringResource(R.string.action_cancel)) } },
         )
         is ExportStatus.Done -> AlertDialog(
             onDismissRequest = vm::dismissExport,
-            title = { Text("Saved") },
-            text = { Text("Your video is in Movies/Vits.") },
+            title = { Text(stringResource(R.string.export_saved)) },
+            text = { Text(stringResource(R.string.export_saved_where)) },
             confirmButton = {
                 if (status.uri.scheme == "content") {
                     TextButton(onClick = {
@@ -188,16 +221,16 @@ private fun ExportDialog(status: ExportStatus, vm: EditorViewModel) {
                                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
                         )
                         vm.dismissExport()
-                    }) { Text("Play") }
+                    }) { Text(stringResource(R.string.action_play)) }
                 }
             },
-            dismissButton = { TextButton(onClick = vm::dismissExport) { Text("Close") } },
+            dismissButton = { TextButton(onClick = vm::dismissExport) { Text(stringResource(R.string.action_close)) } },
         )
         is ExportStatus.Failed -> AlertDialog(
             onDismissRequest = vm::dismissExport,
-            title = { Text("Export failed") },
+            title = { Text(stringResource(R.string.export_failed)) },
             text = { Text(status.message) },
-            confirmButton = { TextButton(onClick = vm::dismissExport) { Text("OK") } },
+            confirmButton = { TextButton(onClick = vm::dismissExport) { Text(stringResource(R.string.action_ok)) } },
         )
     }
 }

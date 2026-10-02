@@ -8,32 +8,28 @@ import android.opengl.GLES30.glBindFramebuffer
 import android.opengl.GLES30.glClear
 import android.opengl.GLES30.glClearColor
 import android.opengl.GLES30.glViewport
-import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.view.Choreographer
 import android.view.Surface
-import com.vits.engine.MediaInfo
-import com.vits.engine.MediaInput
-import com.vits.engine.SmoothMode
+import com.vits.engine.AssetResolver
 import com.vits.engine.gl.EglCore
 import com.vits.engine.interp.FlowQuality
-import com.vits.engine.render.TimelineRenderer
-import com.vits.timeline.SpeedSpec
-import com.vits.timeline.TimeMap
+import com.vits.engine.render.CompositionRenderer
+import com.vits.project.Project
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Real-time player for a retimed clip. All GPU and codec work happens on one render thread,
+ * Real-time player for a [Project]. All GPU and codec work happens on one render thread,
  * paced by Choreographer; if a frame takes too long, playback skips ahead instead of drifting.
  * Public methods are thread-safe; [Listener] callbacks arrive on the main thread.
  */
-class PreviewEngine(private val listener: Listener) {
+class PreviewEngine(private val resolver: AssetResolver, private val listener: Listener) {
     interface Listener {
-        fun onPosition(outputUs: Long, durationUs: Long)
+        fun onPosition(timelineUs: Long, durationUs: Long)
         fun onPlayingChanged(playing: Boolean)
         fun onError(error: Throwable)
     }
@@ -49,17 +45,13 @@ class PreviewEngine(private val listener: Listener) {
     private var window: EGLSurface = EGL14.EGL_NO_SURFACE
     private var surfaceWidth = 0
     private var surfaceHeight = 0
-    private var info: MediaInfo? = null
-    private var renderer: TimelineRenderer? = null
-    private var spec: SpeedSpec = SpeedSpec.Constant(1.0)
-    private var map: TimeMap? = null
-    private var mode = SmoothMode.FRAME_BLENDING
+    private var renderer: CompositionRenderer? = null
+    private var project: Project? = null
     private var positionUs = 0L
     private var playing = false
     private var clockStartNs = -1L
     private var clockStartUs = 0L
     private var pendingSeek: Long? = null
-    private val posMatrix = FloatArray(16)
 
     init {
         handler.post {
@@ -70,22 +62,25 @@ class PreviewEngine(private val listener: Listener) {
         }
     }
 
-    /** Loads a clip (or unloads with null), keeping the current speed settings. */
-    fun open(input: MediaInput?, info: MediaInfo?, startOutputUs: Long = 0) = post {
-        Log.d(TAG, "open $info")
-        stopPlayback()
-        renderer?.close()
-        renderer = null
-        this.info = info
-        if (input != null && info != null) {
-            makeCurrent()
-            renderer = TimelineRenderer(input, info, FlowQuality.PREVIEW)
-            map = TimeMap(spec, info.durationUs)
-            positionUs = startOutputUs.coerceIn(0, map!!.outputDurationUs)
-            drawFrame()
-        } else {
-            map = null
+    /**
+     * Shows [project] (null unloads it and frees every decoder). [positionUs] moves the playhead;
+     * omit it to keep the current one, clamped to the new duration.
+     */
+    fun setProject(project: Project?, positionUs: Long? = null) = post {
+        this.project = project
+        if (project == null || project.main.clips.isEmpty()) {
+            stopPlayback()
+            renderer?.close()
+            renderer = null
+            return@post
         }
+        val r = renderer ?: run {
+            makeCurrent()
+            CompositionRenderer(resolver, FlowQuality.PREVIEW).also { renderer = it }
+        }
+        r.project = project
+        this.positionUs = (positionUs ?: this.positionUs).coerceIn(0, project.durationUs)
+        if (playing) restartClock() else drawFrame()
     }
 
     /**
@@ -119,26 +114,10 @@ class PreviewEngine(private val listener: Listener) {
         }
     }
 
-    /** Changes the speed; the source frame on screen stays put while the output timeline re-flows. */
-    fun setSpeed(spec: SpeedSpec) = post {
-        this.spec = spec
-        val info = info ?: return@post
-        val old = map
-        val source = old?.sourceTimeAt(positionUs) ?: 0L
-        map = TimeMap(spec, info.durationUs)
-        positionUs = map!!.outputTimeAt(source)
-        if (playing) restartClock() else drawFrame()
-    }
-
-    fun setSmoothMode(mode: SmoothMode) = post {
-        this.mode = mode
-        if (!playing) drawFrame()
-    }
-
     fun play() = post {
-        val m = map ?: return@post
-        if (playing) return@post
-        if (positionUs >= m.outputDurationUs - 1000) positionUs = 0
+        val p = project ?: return@post
+        if (playing || renderer == null) return@post
+        if (positionUs >= p.durationUs - 1000) positionUs = 0
         playing = true
         restartClock()
         choreographer.postFrameCallback(frameCallback)
@@ -148,14 +127,14 @@ class PreviewEngine(private val listener: Listener) {
     fun pause() = post { stopPlayback() }
 
     /** Scrubs to output time [outputUs]. Bursts of seeks collapse into the latest one. */
-    fun seekTo(outputUs: Long) {
+    fun seekTo(timelineUs: Long) {
         handler.post {
             val first = pendingSeek == null
-            pendingSeek = outputUs
+            pendingSeek = timelineUs
             if (first) handler.post {
                 val target = pendingSeek ?: return@post
                 pendingSeek = null
-                positionUs = target.coerceIn(0, map?.outputDurationUs ?: 0)
+                positionUs = target.coerceIn(0, project?.durationUs ?: 0)
                 if (playing) restartClock() else drawFrame()
             }
         }
@@ -176,11 +155,11 @@ class PreviewEngine(private val listener: Listener) {
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
             if (!playing) return
-            val m = map ?: return
+            val p = project ?: return
             if (clockStartNs < 0) clockStartNs = frameTimeNanos
             positionUs = clockStartUs + (frameTimeNanos - clockStartNs) / 1000
-            val end = positionUs >= m.outputDurationUs
-            if (end) positionUs = m.outputDurationUs
+            val end = positionUs >= p.durationUs
+            if (end) positionUs = p.durationUs
             drawFrame()
             if (end) stopPlayback() else choreographer.postFrameCallback(this)
         }
@@ -188,24 +167,22 @@ class PreviewEngine(private val listener: Listener) {
 
     private fun drawFrame() {
         val r = renderer ?: return
-        val m = map ?: return
-        val info = info ?: return
+        val p = project ?: return
         if (window == EGL14.EGL_NO_SURFACE) return
         try {
             egl.makeCurrent(window)
-            val source = m.sourceTimeAt(positionUs)
-            computePosMatrix(info)
-            r.render(source, m.speedAtSource(source), mode, posMatrix) {
+            val canvas = p.resolvedCanvas
+            r.render(positionUs) {
                 glBindFramebuffer(GL_FRAMEBUFFER, 0)
                 glViewport(0, 0, surfaceWidth, surfaceHeight)
                 glClearColor(0f, 0f, 0f, 1f)
                 glClear(GL_COLOR_BUFFER_BIT)
+                letterbox(canvas.width.toFloat() / canvas.height)
             }
             egl.swapBuffers(window)
-            if (!playing) Log.d(TAG, "drew source=$source out=$positionUs")
-            val p = positionUs
-            val d = m.outputDurationUs
-            main.post { listener.onPosition(p, d) }
+            val pos = positionUs
+            val d = p.durationUs
+            main.post { listener.onPosition(pos, d) }
         } catch (t: Throwable) {
             Log.e(TAG, "render failed", t)
             stopPlayback()
@@ -213,15 +190,16 @@ class PreviewEngine(private val listener: Listener) {
         }
     }
 
-    /** Rotates coded frames upright and letterboxes them into the surface. */
-    private fun computePosMatrix(info: MediaInfo) {
-        val videoAspect = info.displayWidth.toFloat() / info.displayHeight
+    /** Restricts drawing to the largest rectangle of [aspect] centred in the surface. */
+    private fun letterbox(aspect: Float) {
         val surfaceAspect = surfaceWidth.toFloat() / surfaceHeight
-        val sx = if (videoAspect > surfaceAspect) 1f else videoAspect / surfaceAspect
-        val sy = if (videoAspect > surfaceAspect) surfaceAspect / videoAspect else 1f
-        Matrix.setIdentityM(posMatrix, 0)
-        Matrix.scaleM(posMatrix, 0, sx, sy, 1f)
-        Matrix.rotateM(posMatrix, 0, -info.rotation.toFloat(), 0f, 0f, 1f)
+        if (aspect > surfaceAspect) {
+            val h = (surfaceWidth / aspect).toInt()
+            glViewport(0, (surfaceHeight - h) / 2, surfaceWidth, h)
+        } else {
+            val w = (surfaceHeight * aspect).toInt()
+            glViewport((surfaceWidth - w) / 2, 0, w, surfaceHeight)
+        }
     }
 
     private fun restartClock() {

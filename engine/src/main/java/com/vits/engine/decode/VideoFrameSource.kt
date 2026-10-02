@@ -8,8 +8,8 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.view.Surface
-import com.vits.engine.MediaInfo
 import com.vits.engine.MediaInput
+import com.vits.project.MediaAsset
 import java.io.Closeable
 
 /**
@@ -19,7 +19,7 @@ import java.io.Closeable
  */
 internal class VideoFrameSource(
     input: MediaInput,
-    private val info: MediaInfo,
+    private val info: MediaAsset,
     val oesTexture: Int,
 ) : Closeable {
     private val extractor: MediaExtractor = input.newExtractor().apply { selectTrack(info.videoTrack) }
@@ -35,6 +35,8 @@ internal class VideoFrameSource(
 
     private var inputDone = false
     private var outputDone = false
+    /** Whether anything was queued since start/flush; flushing an idle codec is not just wasted work. */
+    private var queuedSinceFlush = false
     private var skipBeforeUs = Long.MIN_VALUE
 
     /** SurfaceTexture transform (crop + flip) for the latched frame. */
@@ -64,7 +66,10 @@ internal class VideoFrameSource(
     /** Repositions so the next frames returned lead up to [sourceUs] (skipping far-earlier ones). */
     fun seekTo(sourceUs: Long) {
         Log.d(TAG, "seek $sourceUs")
-        decoder.flush()
+        // Codec2 finishes starting asynchronously; a flush racing that (first seek right after
+        // start) can wedge the codec so it never outputs. Nothing to discard yet anyway.
+        if (queuedSinceFlush) decoder.flush()
+        queuedSinceFlush = false
         extractor.seekTo(info.originUs + sourceUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         inputDone = false
         outputDone = false
@@ -89,6 +94,7 @@ internal class VideoFrameSource(
         runCatching { decoder.stop() }
         decoder.release()
         decoder = createDecoder()
+        queuedSinceFlush = false
         val resumeAt = if (lastReturnedUs == Long.MIN_VALUE) skipBeforeUs + SKIP_MARGIN_US else lastReturnedUs
         extractor.seekTo(info.originUs + maxOf(0, resumeAt), MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         inputDone = false
@@ -134,10 +140,12 @@ internal class VideoFrameSource(
             val size = extractor.readSampleData(buf, 0)
             if (size < 0) {
                 decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                queuedSinceFlush = true
                 inputDone = true
                 return
             }
             decoder.queueInputBuffer(index, 0, size, extractor.sampleTime, 0)
+            queuedSinceFlush = true
             extractor.advance()
         }
     }

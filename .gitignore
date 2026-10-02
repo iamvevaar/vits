@@ -6,3 +6,6 @@ local.properties
 .kotlin/
 captures/
 dist/
+bin/
+tools/quality-bench/work/
+.DS_Store

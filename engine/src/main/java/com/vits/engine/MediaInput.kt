@@ -5,13 +5,19 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import kotlin.math.roundToInt
+import com.vits.project.MediaAsset
 
-/** A user-picked video. Every pipeline opens its own extractor so they can run independently. */
+/** A media file. Every pipeline opens its own extractor so they can run independently. */
 class MediaInput(private val context: Context, val uri: Uri) {
+    constructor(context: Context, asset: MediaAsset) : this(context, Uri.parse(asset.uri))
+
     internal fun newExtractor() = MediaExtractor().apply { setDataSource(context, uri, null) }
 
-    fun probe(): MediaInfo {
+    /** True if the file can still be opened (it may have been deleted or its permission revoked). */
+    fun isReadable(): Boolean = runCatching { newExtractor().release() }.isSuccess
+
+    /** Reads everything the engine needs about the file; [id] becomes the asset's identity. */
+    fun probe(id: String): MediaAsset {
         val ex = newExtractor()
         try {
             var video = -1
@@ -26,7 +32,6 @@ class MediaInput(private val context: Context, val uri: Uri) {
 
             // Presentation of the first frame (B-frames make decode order differ, so take a min).
             ex.selectTrack(video)
-            var origin = Long.MAX_VALUE
             val times = ArrayList<Long>()
             repeat(90) {
                 val t = ex.sampleTime
@@ -34,8 +39,7 @@ class MediaInput(private val context: Context, val uri: Uri) {
                 times += t
                 ex.advance()
             }
-            times.take(30).forEach { origin = minOf(origin, it) }
-            if (origin == Long.MAX_VALUE) origin = 0
+            val origin = times.take(30).minOrNull() ?: 0L
 
             // Measured spacing beats KEY_FRAME_RATE, which some extractors derive as
             // frames / container duration (wrong whenever an edit list pads the track).
@@ -54,17 +58,17 @@ class MediaInput(private val context: Context, val uri: Uri) {
                 retriever.release()
             }
 
-            val duration = f.longOrNull(MediaFormat.KEY_DURATION)
-                ?: error("Video duration unknown")
-            return MediaInfo(
-                videoTrack = video,
-                audioTrack = audio,
+            return MediaAsset(
+                id = id,
+                uri = uri.toString(),
+                durationUs = f.longOrNull(MediaFormat.KEY_DURATION) ?: error("Video duration unknown"),
                 width = f.getInteger(MediaFormat.KEY_WIDTH),
                 height = f.getInteger(MediaFormat.KEY_HEIGHT),
                 rotation = ((rotation % 360) + 360) % 360,
-                durationUs = duration,
-                originUs = origin,
                 frameRate = fps,
+                videoTrack = video,
+                audioTrack = audio,
+                originUs = origin,
             )
         } finally {
             ex.release()
@@ -88,25 +92,6 @@ class MediaInput(private val context: Context, val uri: Uri) {
     private companion object {
         val STANDARD_RATES = floatArrayOf(23.976f, 24f, 25f, 29.97f, 30f, 48f, 50f, 59.94f, 60f, 90f, 120f, 240f)
     }
-}
-
-data class MediaInfo(
-    val videoTrack: Int,
-    val audioTrack: Int,
-    /** Coded (unrotated) frame size. */
-    val width: Int,
-    val height: Int,
-    /** Clockwise rotation needed for display. */
-    val rotation: Int,
-    val durationUs: Long,
-    /** Presentation time of the first frame; source time 0 maps to this pts. */
-    val originUs: Long,
-    val frameRate: Float,
-) {
-    val hasAudio get() = audioTrack >= 0
-    val displayWidth get() = if (rotation % 180 == 0) width else height
-    val displayHeight get() = if (rotation % 180 == 0) height else width
-    val nominalFps get() = frameRate.roundToInt().coerceIn(24, 60)
 }
 
 internal fun MediaFormat.intOrNull(key: String): Int? =

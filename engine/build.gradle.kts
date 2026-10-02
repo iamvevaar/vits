@@ -18,6 +18,6 @@ android {
 kotlin { jvmToolchain(17) }
 
 dependencies {
-    api(project(":core:timeline"))
+    api(project(":core:project"))
     implementation(project(":core:audio"))
 }

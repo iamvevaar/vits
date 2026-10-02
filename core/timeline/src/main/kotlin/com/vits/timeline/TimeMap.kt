@@ -7,11 +7,13 @@ package com.vits.timeline
  * For curves the integral is tabulated once (Simpson per cell) so every lookup is O(log N),
  * cheap enough to call per rendered frame and per audio hop.
  */
-class TimeMap(val spec: SpeedSpec, val sourceDurationUs: Long) {
+class TimeMap(spec: SpeedSpec, val sourceDurationUs: Long) {
+    val spec: SpeedSpec = spec.simplified()
     private val d = sourceDurationUs.toDouble()
+    private val constant = this.spec as? SpeedSpec.Constant
 
-    // cumulative[i] = ∫₀^(i/N) 1/s(u) du ; only used for curves.
-    private val cumulative: DoubleArray? = (spec as? SpeedSpec.Curve)?.let { curve ->
+    // cumulative[i] = ∫₀^(i/N) 1/s(u) du ; only used for non-constant speeds.
+    private val cumulative: DoubleArray? = if (constant != null) null else this.spec.let { curve ->
         DoubleArray(LUT_SIZE + 1).also { c ->
             val h = 1.0 / LUT_SIZE
             for (i in 0 until LUT_SIZE) {
@@ -24,18 +26,15 @@ class TimeMap(val spec: SpeedSpec, val sourceDurationUs: Long) {
         }
     }
 
-    val outputDurationUs: Long = when (spec) {
-        is SpeedSpec.Constant -> (d / spec.speed).toLong()
-        is SpeedSpec.Curve -> (d * cumulative!![LUT_SIZE]).toLong()
-    }
+    val outputDurationUs: Long =
+        if (constant != null) (d / constant.speed).toLong() else (d * cumulative!![LUT_SIZE]).toLong()
 
     /** Source time (µs) shown at output time [outputUs]. */
     fun sourceTimeAt(outputUs: Long): Long {
         if (outputUs <= 0) return 0
         if (outputUs >= outputDurationUs) return sourceDurationUs
-        return when (spec) {
-            is SpeedSpec.Constant -> (outputUs * spec.speed).toLong().coerceAtMost(sourceDurationUs)
-            is SpeedSpec.Curve -> {
+        return when (constant) {
+            null -> {
                 val c = cumulative!!
                 val target = outputUs / d
                 var lo = 0
@@ -47,6 +46,7 @@ class TimeMap(val spec: SpeedSpec, val sourceDurationUs: Long) {
                 val frac = (target - c[lo]) / (c[hi] - c[lo])
                 ((lo + frac) / LUT_SIZE * d).toLong()
             }
+            else -> (outputUs * constant.speed).toLong().coerceAtMost(sourceDurationUs)
         }
     }
 
@@ -54,21 +54,21 @@ class TimeMap(val spec: SpeedSpec, val sourceDurationUs: Long) {
     fun outputTimeAt(sourceUs: Long): Long {
         if (sourceUs <= 0) return 0
         if (sourceUs >= sourceDurationUs) return outputDurationUs
-        return when (spec) {
-            is SpeedSpec.Constant -> (sourceUs / spec.speed).toLong()
-            is SpeedSpec.Curve -> {
+        return when (constant) {
+            null -> {
                 val c = cumulative!!
                 val pos = sourceUs / d * LUT_SIZE
                 val i = pos.toInt().coerceAtMost(LUT_SIZE - 1)
                 val v = c[i] + (c[i + 1] - c[i]) * (pos - i)
                 (v * d).toLong()
             }
+            else -> (sourceUs / constant.speed).toLong()
         }
     }
 
     /** Instantaneous speed at source time [sourceUs]. */
     fun speedAtSource(sourceUs: Long): Double =
-        spec.speedAt((sourceUs / d).coerceIn(0.0, 1.0))
+        this.spec.speedAt((sourceUs / d).coerceIn(0.0, 1.0))
 
     companion object {
         private const val LUT_SIZE = 4096

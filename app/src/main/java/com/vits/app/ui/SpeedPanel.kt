@@ -34,18 +34,21 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
+import com.vits.app.R
 import com.vits.app.CurveChoice
 import com.vits.app.EditorUiState
 import com.vits.app.EditorViewModel
 import com.vits.app.SpeedTab
-import com.vits.engine.SmoothMode
+import com.vits.project.Clip
+import com.vits.project.Smoothing
 import com.vits.timeline.SpeedPreset
 import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
 @Composable
-fun SpeedPanel(state: EditorUiState, vm: EditorViewModel, sourceDurationUs: Long) {
+fun SpeedPanel(state: EditorUiState, vm: EditorViewModel, clip: Clip) {
     Column(
         Modifier
             .fillMaxWidth()
@@ -53,20 +56,20 @@ fun SpeedPanel(state: EditorUiState, vm: EditorViewModel, sourceDurationUs: Long
             .background(VitsColors.Surface)
             .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
-        Text("Speed", color = VitsColors.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.speed_title), color = VitsColors.Text, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(12.dp))
         SegmentedTabs(
-            options = listOf("Normal", "Curve"),
+            options = listOf(stringResource(R.string.speed_tab_normal), stringResource(R.string.speed_tab_curve)),
             selected = state.tab.ordinal,
             onSelect = { vm.setTab(SpeedTab.entries[it]) },
         )
         Spacer(Modifier.height(14.dp))
         when (state.tab) {
-            SpeedTab.NORMAL -> NormalSpeed(state.constantSpeed, vm::setConstantSpeed)
+            SpeedTab.NORMAL -> NormalSpeed(state.constantSpeed, vm::setConstantSpeed, vm::endGesture)
             SpeedTab.CURVE -> CurveSpeed(state, vm)
         }
         Spacer(Modifier.height(10.dp))
-        DurationLine(sourceDurationUs, vm.outputDurationUs)
+        DurationLine(clip.sourceDurationUs, clip.durationUs)
         Spacer(Modifier.height(10.dp))
         SmoothSlowMo(state, vm)
     }
@@ -105,7 +108,7 @@ private fun SegmentedTabs(options: List<String>, selected: Int, onSelect: (Int) 
 
 /** Logarithmic 0.1x–100x slider: equal finger travel for 0.5x→1x and 1x→2x. */
 @Composable
-private fun NormalSpeed(speed: Double, onChange: (Double) -> Unit) {
+private fun NormalSpeed(speed: Double, onChange: (Double) -> Unit, onChangeFinished: () -> Unit) {
     Column {
         Text(
             formatSpeed(speed),
@@ -122,6 +125,7 @@ private fun NormalSpeed(speed: Double, onChange: (Double) -> Unit) {
                 onChange(if (kotlin.math.abs(v) < 0.025f) 1.0 else roundSpeed(raw))
             },
             valueRange = -1f..2f,
+            onValueChangeFinished = onChangeFinished,
             colors = SliderDefaults.colors(
                 thumbColor = Color.White,
                 activeTrackColor = VitsColors.Accent,
@@ -147,8 +151,8 @@ private fun NormalSpeed(speed: Double, onChange: (Double) -> Unit) {
 @Composable
 private fun CurveSpeed(state: EditorUiState, vm: EditorViewModel) {
     val choices: List<Pair<CurveChoice, String>> =
-        listOf(CurveChoice.None to "None", CurveChoice.Custom to "Custom") +
-            SpeedPreset.entries.map { CurveChoice.Preset(it) to it.label }
+        listOf(CurveChoice.None to stringResource(R.string.curve_none), CurveChoice.Custom to stringResource(R.string.curve_custom)) +
+            SpeedPreset.entries.map { CurveChoice.Preset(it) to stringResource(it.labelRes) }
     Column {
         choices.chunked(4).forEach { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -174,11 +178,12 @@ private fun CurveSpeed(state: EditorUiState, vm: EditorViewModel) {
                 onCurveChange = vm::updateCurve,
                 onSelect = vm::selectPoint,
                 onScrub = vm::seekToSourceFraction,
+                onGestureEnd = vm::endGesture,
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = vm::addPoint) { Text("+ Beat") }
-                TextButton(onClick = vm::deleteSelectedPoint, enabled = state.selectedPoint != null) { Text("Delete") }
-                TextButton(onClick = vm::resetCurve) { Text("Reset") }
+                TextButton(onClick = vm::addPoint) { Text(stringResource(R.string.curve_add_beat)) }
+                TextButton(onClick = vm::deleteSelectedPoint, enabled = state.selectedPoint != null) { Text(stringResource(R.string.curve_delete_point)) }
+                TextButton(onClick = vm::resetCurve) { Text(stringResource(R.string.curve_reset)) }
             }
         }
     }
@@ -234,7 +239,11 @@ private fun PresetTile(
 @Composable
 private fun DurationLine(sourceUs: Long, outputUs: Long) {
     Text(
-        "Duration: ${"%.1f".format(sourceUs / 1e6)}s → ${"%.1f".format(outputUs / 1e6)}s",
+        stringResource(
+            R.string.duration_change,
+            stringResource(R.string.seconds_short, sourceUs / 1e6),
+            stringResource(R.string.seconds_short, outputUs / 1e6),
+        ),
         color = VitsColors.TextDim,
         fontSize = 13.sp,
     )
@@ -245,10 +254,9 @@ private fun SmoothSlowMo(state: EditorUiState, vm: EditorViewModel) {
     Column {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Smooth slow-mo", color = VitsColors.Text, fontSize = 15.sp)
+                Text(stringResource(R.string.smooth_slowmo), color = VitsColors.Text, fontSize = 15.sp)
                 Text(
-                    if (state.hasSlowMotion) "Creates in-between frames where speed < 1x"
-                    else "Takes effect when speed is below 1x",
+                    stringResource(if (state.hasSlowMotion) R.string.smooth_active else R.string.smooth_inactive),
                     color = VitsColors.TextDim,
                     fontSize = 12.sp,
                 )
@@ -262,9 +270,9 @@ private fun SmoothSlowMo(state: EditorUiState, vm: EditorViewModel) {
         if (state.smoothEnabled) {
             Spacer(Modifier.height(8.dp))
             SegmentedTabs(
-                options = listOf("Frame blending", "Optical flow"),
-                selected = if (state.smoothMode == SmoothMode.OPTICAL_FLOW) 1 else 0,
-                onSelect = { vm.setSmoothMode(if (it == 1) SmoothMode.OPTICAL_FLOW else SmoothMode.FRAME_BLENDING) },
+                options = listOf(stringResource(R.string.smooth_frame_blending), stringResource(R.string.smooth_optical_flow)),
+                selected = if (state.smoothMode == Smoothing.OPTICAL_FLOW) 1 else 0,
+                onSelect = { vm.setSmoothMode(if (it == 1) Smoothing.OPTICAL_FLOW else Smoothing.FRAME_BLENDING) },
             )
         }
     }
@@ -282,3 +290,13 @@ fun formatSpeed(s: Double): String = when {
     s < 1 -> "${"%.2f".format(s).trimEnd('0')}x"
     else -> "${"%.1f".format(s)}x"
 }
+
+private val SpeedPreset.labelRes: Int
+    get() = when (this) {
+        SpeedPreset.MONTAGE -> R.string.curve_montage
+        SpeedPreset.HERO -> R.string.curve_hero
+        SpeedPreset.BULLET -> R.string.curve_bullet
+        SpeedPreset.JUMP_CUT -> R.string.curve_jump_cut
+        SpeedPreset.FLASH_IN -> R.string.curve_flash_in
+        SpeedPreset.FLASH_OUT -> R.string.curve_flash_out
+    }

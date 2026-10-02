@@ -1,3 +1,49 @@
 <resources>
     <string name="app_name">Vits</string>
+
+    <!-- Editor -->
+    <string name="action_replace">Replace</string>
+    <string name="action_export">Export</string>
+    <string name="action_import_video">Import video</string>
+    <string name="works_offline">Works fully offline</string>
+    <string name="action_play">Play</string>
+    <string name="action_pause">Pause</string>
+    <string name="time_position">%1$s / %2$s</string>
+
+    <!-- Speed panel -->
+    <string name="speed_title">Speed</string>
+    <string name="speed_tab_normal">Normal</string>
+    <string name="speed_tab_curve">Curve</string>
+    <string name="curve_none">None</string>
+    <string name="curve_custom">Custom</string>
+    <string name="curve_montage">Montage</string>
+    <string name="curve_hero">Hero</string>
+    <string name="curve_bullet">Bullet</string>
+    <string name="curve_jump_cut">Jump Cut</string>
+    <string name="curve_flash_in">Flash In</string>
+    <string name="curve_flash_out">Flash Out</string>
+    <string name="curve_add_beat">+ Beat</string>
+    <string name="curve_delete_point">Delete</string>
+    <string name="curve_reset">Reset</string>
+    <string name="duration_change">Duration: %1$s → %2$s</string>
+    <string name="seconds_short">%.1fs</string>
+    <string name="smooth_slowmo">Smooth slow-mo</string>
+    <string name="smooth_active">Creates in-between frames where speed &lt; 1x</string>
+    <string name="smooth_inactive">Takes effect when speed is below 1x</string>
+    <string name="smooth_frame_blending">Frame blending</string>
+    <string name="smooth_optical_flow">Optical flow</string>
+
+    <!-- Dialogs -->
+    <string name="action_ok">OK</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_close">Close</string>
+    <string name="error_title">Something went wrong</string>
+    <string name="error_open_video">Couldn\'t open this video. %1$s</string>
+    <string name="error_playback">Playback stopped. %1$s</string>
+    <string name="export_running">Exporting</string>
+    <string name="export_percent">%1$d%%</string>
+    <string name="export_saved">Saved</string>
+    <string name="export_saved_where">Your video is in Movies/Vits.</string>
+    <string name="export_failed">Export failed</string>
+    <string name="export_channel">Exports</string>
 </resources>

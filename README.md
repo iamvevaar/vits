@@ -1,29 +1,42 @@
 # Vits
 
-An offline Android video editor. Layer 1: **speed control** (constant 0.1x–100x and speed curves)
-with **smooth slow-motion** (frame blending or optical flow), real-time preview and MP4 export.
+An offline Android video editor. Built so far: a **project/timeline model** (clips, trim, split,
+reorder, per-clip speed, undo/redo, autosave), **speed control** (constant 0.1x–100x and speed
+curves) with **smooth slow-motion** (frame blending or optical flow), real-time preview, and MP4
+export in a foreground service.
 
 ## Build & run
 
 ```sh
 ./gradlew :app:installDebug                      # needs a device / emulator with GLES 3.0
-./gradlew :core:timeline:test :core:audio:test   # pure-JVM unit tests
+./gradlew test                                   # pure-JVM unit tests (core modules)
+tools/quality-bench/run.sh flow                  # interpolation quality vs ground truth
+tools/quality-bench/av-check.sh                  # multi-clip A/V correctness
 ```
 
 ## Architecture
 
 ```
-app/            Compose UI + EditorViewModel (state, no media code)
-engine/         Android media + GPU engine
+app/            Compose UI, EditorViewModel (History<Project>, autosave), export service
+engine/         Android media + GPU engine; renders a Project
   decode/         VideoFrameSource: MediaCodec → SurfaceTexture (zero-copy, hardware decode)
-  render/         FrameCache (2 bracketing frames resident on GPU), TimelineRenderer
-  interp/         OpticalFlow: coarse-to-fine Lucas–Kanade in fragment shaders
+  render/         CompositionRenderer (timeline → clip → canvas), AssetRenderer (per clip),
+                  FrameCache (2 bracketing frames resident on GPU)
+  interp/         OpticalFlow: coarse-to-fine Lucas–Kanade + variational refinement in shaders
   gl/             EGL, programs, render targets, all GLSL in Shaders.kt
   preview/        PreviewEngine: render thread paced by Choreographer
-  export/         Exporter (H.264 via encoder input surface) + AudioRetimer (AAC)
-core/timeline/  SpeedSpec, presets, TimeMap (source ↔ output time). Pure Kotlin.
-core/audio/     WsolaTimeStretcher: pitch-preserving, variable-speed. Pure Kotlin.
+  export/         Exporter (H.264), AudioMixdown (per-clip retime → 48 kHz stereo AAC), AacDelay
+core/project/   Project, Clip, MediaAsset, edits, History, ProjectCodec (versioned JSON). Pure Kotlin.
+core/timeline/  SpeedSpec (incl. Windowed), presets, TimeMap (source ↔ output time). Pure Kotlin.
+core/audio/     WsolaTimeStretcher (pitch-preserving), Resampler (windowed sinc). Pure Kotlin.
 ```
+
+### Project model
+
+Immutable data; every edit is a pure function (`splitAt`, `trim`, `moveClip`, `setSpeed`, …) and
+`History` gives undo/redo with gesture coalescing. A clip's speed is defined over a *speed domain*
+in source time that trims and splits never change, so splitting a speed-ramped clip moves no
+frame. Saved projects carry `schemaVersion`; old files migrate forward, newer files are refused.
 
 ### Frame path (preview and export share it)
 
@@ -82,10 +95,15 @@ Video frames and the audio stretcher use the same map, so A/V stay in sync by co
   orientation hint (export).
 - Timestamps are snapped within 1 ms to real frames (µs rounding otherwise shows the previous frame).
 - A wedged decoder is recreated once, resuming after the last delivered frame.
+- Each clip on screen gets its own decoder and the next clip is pre-rolled before the cut.
+- Audio: clip edges get 4 ms raised-cosine fades; the AAC encoder+decoder latency is measured on
+  the device (`AacDelay`) and cancelled in packet timestamps. MediaMuxer can't write an edit list,
+  so FFmpeg-based players hear audio ≈21 ms early (Android players: on time).
 - Frame rate comes from the median frame interval, snapped to standard rates. `KEY_FRAME_RATE` is
   wrong when an edit list pads the track.
 
 ## Next layers
 
-Trim/split timeline · audio in preview · HEVC / 60 fps export option · flow quality tuning on real
-footage · optional ML interpolation (RIFE via NNAPI/GPU delegate) as a third smooth mode.
+Timeline UI (clip strip, split/delete/reorder, undo buttons) · audio in preview · HEVC / 60 fps
+export option · own MP4 muxer with edit lists · flow tuning on real footage · optional ML
+interpolation (RIFE via NNAPI/GPU delegate).

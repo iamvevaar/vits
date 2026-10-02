@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "vits"
-include(":app", ":engine", ":core:timeline", ":core:audio")
+include(":app", ":engine", ":core:timeline", ":core:audio", ":core:project")

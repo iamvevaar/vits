@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 108dp adaptive canvas; artwork kept inside the 66dp safe zone. A play triangle trailing
+     slow-motion echoes: the app's first feature. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#4DFF9933" android:pathData="M34,38 L48,54 L34,70 Z" />
+    <path android:fillColor="#99FF9933" android:pathData="M42,36 L58,54 L42,72 Z" />
+    <path android:fillColor="#FFFF9933" android:pathData="M52,34 L76,54 L52,74 Z" />
+</vector>

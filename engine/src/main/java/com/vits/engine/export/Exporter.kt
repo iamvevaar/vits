@@ -10,34 +10,32 @@ import android.opengl.GLES30.glBindFramebuffer
 import android.opengl.GLES30.glViewport
 import android.os.Looper
 import android.util.Log
-import com.vits.engine.MediaInfo
-import com.vits.engine.MediaInput
-import com.vits.engine.SmoothMode
+import android.opengl.GLES30.GL_COLOR_BUFFER_BIT
+import android.opengl.GLES30.glClear
+import android.opengl.GLES30.glClearColor
+import android.opengl.Matrix
+import com.vits.engine.AssetResolver
 import com.vits.engine.gl.EglCore
-import com.vits.engine.gl.IDENTITY
 import com.vits.engine.interp.FlowQuality
-import com.vits.engine.render.TimelineRenderer
-import com.vits.timeline.SpeedSpec
-import com.vits.timeline.TimeMap
+import com.vits.engine.render.CompositionRenderer
+import com.vits.project.Project
 import java.io.File
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 data class ExportRequest(
-    val input: MediaInput,
-    val info: MediaInfo,
-    val speed: SpeedSpec,
-    val smoothMode: SmoothMode,
+    val project: Project,
+    val resolver: AssetResolver,
     val output: File,
-    /** Output frame rate; defaults to the source's. Higher values make slow-mo even smoother. */
-    val fps: Int = info.nominalFps,
+    /** Output frame rate; defaults to the canvas rate. Higher values make slow-mo even smoother. */
+    val fps: Int = project.resolvedCanvas.fps,
     /** Overrides the automatic bitrate (bits/s); used by benchmarks to keep codec loss negligible. */
     val bitrate: Int? = null,
 )
 
 /**
- * Renders a retimed clip to MP4 (H.264 + AAC). Blocking; run it on a dedicated HandlerThread
+ * Renders a [Project] to MP4 (H.264 + AAC). Blocking; run it on a dedicated HandlerThread
  * because it binds a GL context to the calling thread and needs a Looper. Throws on failure; returns normally on success.
  */
 class Exporter(private val request: ExportRequest) {
@@ -52,10 +50,13 @@ class Exporter(private val request: ExportRequest) {
         // owned by a thread without a Looper; fail fast instead of stalling.
         checkNotNull(Looper.myLooper()) { "Exporter.run must be called on a Looper thread (e.g. HandlerThread)" }
         val r = request
-        val map = TimeMap(r.speed, r.info.durationUs)
-        val audio = AudioRetimer(r.input, r.info, map, { cancelled }) { onProgress(it * AUDIO_SHARE) }.run()
+        require(r.project.main.clips.isNotEmpty()) { "Nothing to export" }
+        val audio = AudioMixdown(r.project, r.resolver, { cancelled }) { onProgress(it * AUDIO_SHARE) }.run()
 
-        val (encWidth, encHeight) = encoderSize(r.info.width, r.info.height)
+        val canvas = r.project.resolvedCanvas
+        val (encWidth, encHeight, rotated) = encoderSize(canvas.width, canvas.height)
+        // Encoders that refuse portrait sizes get landscape frames plus a 90° display hint.
+        val outer = if (rotated) FloatArray(16).also { Matrix.setRotateM(it, 0, 90f, 0f, 0f, 1f) } else null
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, encWidth, encHeight).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_FRAME_RATE, r.fps)
@@ -85,29 +86,30 @@ class Exporter(private val request: ExportRequest) {
 
         r.output.delete()
         val muxer = MediaMuxer(r.output.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        muxer.setOrientationHint(r.info.rotation)
+        muxer.setOrientationHint(if (rotated) 90 else 0)
         val writer = InterleavingWriter(muxer, audio)
 
         val egl = EglCore()
         val eglSurface = egl.createWindowSurface(inputSurface)
         egl.makeCurrent(eglSurface)
-        var renderer: TimelineRenderer? = null
+        var renderer: CompositionRenderer? = null
         var success = false
         try {
-            renderer = TimelineRenderer(r.input, r.info, FlowQuality.EXPORT)
-            val frameCount = max(1L, (map.outputDurationUs * r.fps / 1_000_000.0).roundToLong())
+            renderer = CompositionRenderer(r.resolver, FlowQuality.EXPORT).also { it.project = r.project }
+            val frameCount = max(1L, (r.project.durationUs * r.fps / 1_000_000.0).roundToLong())
             val bufferInfo = MediaCodec.BufferInfo()
             for (k in 0 until frameCount) {
-                if (cancelled) throw ExportCancelled()
+                if (cancelled) throw ExportCancelledException()
                 val outUs = k * 1_000_000 / r.fps
-                val src = map.sourceTimeAt(outUs)
-                renderer.render(src, map.speedAtSource(src), r.smoothMode, IDENTITY) {
+                renderer.render(outUs, outer) {
                     glBindFramebuffer(GL_FRAMEBUFFER, 0)
                     glViewport(0, 0, encWidth, encHeight)
+                    glClearColor(0f, 0f, 0f, 1f)
+                    glClear(GL_COLOR_BUFFER_BIT)
                 }
                 egl.setPresentationTime(eglSurface, outUs * 1000)
                 egl.swapBuffers(eglSurface)
-                if (k % 30 == 0L) Log.d(TAG, "frame $k/$frameCount src=$src")
+                if (k % 30 == 0L) Log.d(TAG, "frame $k/$frameCount t=$outUs")
                 drain(encoder, bufferInfo, writer, endOfStream = false)
                 onProgress(AUDIO_SHARE + (1 - AUDIO_SHARE) * (k + 1) / frameCount)
             }
@@ -147,22 +149,29 @@ class Exporter(private val request: ExportRequest) {
         }
     }
 
-    /** Largest size ≤ the source that the encoder accepts, preserving aspect ratio. */
-    private fun encoderSize(width: Int, height: Int): Pair<Int, Int> {
+    /**
+     * Largest size ≤ the canvas the encoder accepts, preserving aspect ratio. Portrait sizes that
+     * are refused are retried transposed (third value true = frames must be rotated 90°).
+     */
+    private fun encoderSize(width: Int, height: Int): Triple<Int, Int, Boolean> {
         val caps = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
             .filter { it.isEncoder && MediaFormat.MIMETYPE_VIDEO_AVC in it.supportedTypes }
             .map { it.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities }
+        fun supported(w: Int, h: Int) = caps.any { it.isSizeSupported(w, h) }
         var w = width
         var h = height
         repeat(8) {
             val ew = w and 1.inv()
             val eh = h and 1.inv()
-            if (caps.any { it.isSizeSupported(ew, eh) }) return ew to eh
+            if (supported(ew, eh)) return Triple(ew, eh, false)
+            if (eh > ew && supported(eh, ew)) return Triple(eh, ew, true)
             w = (w * 0.85f).roundToInt()
             h = (h * 0.85f).roundToInt()
         }
-        val scale = 1920f / max(width, height)
-        return ((width * scale).roundToInt() and 1.inv()) to ((height * scale).roundToInt() and 1.inv())
+        val scale = 1280f / max(width, height)
+        val ew = (width * scale).roundToInt() and 1.inv()
+        val eh = (height * scale).roundToInt() and 1.inv()
+        return if (eh > ew) Triple(eh, ew, true) else Triple(ew, eh, false)
     }
 
     private fun bitrate(w: Int, h: Int, fps: Int): Int =
